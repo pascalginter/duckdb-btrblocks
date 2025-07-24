@@ -7,36 +7,78 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension_util.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
-
 // OpenSSL linked through vcpkg
-#include <openssl/opensslv.h>
+#include <btrblocks/arrow/DirectoryReader.hpp>
 
 namespace duckdb {
 
-inline void QuackScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Quack " + name.GetString() + " 🐥");
-	});
+struct QuackBindData : public FunctionData {
+public:
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<QuackBindData>();
+	};
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<QuackBindData>();
+		return false;
+	}
+};
+
+static unique_ptr<FunctionData> QuackBind(ClientContext &context, TableFunctionBindInput &input,
+												  vector<LogicalType> &return_types, vector<string> &names) {
+	auto result = make_uniq<QuackBindData>();
+
+	//auto &fs = FileSystem::GetFileSystem(context);
+	//auto handle = fs.OpenFile("http://localhost:8000/data", FileFlags::FILE_FLAGS_READ);
+	//auto size = handle->GetFileSize();
+	//Allocator allocator;
+	//auto data = allocator.Allocate(size);
+
+	//handle->Read(data.get(), size);
+	//std::cout << "data " << (char*) data.get() << std::endl;
+
+	btrblocks::arrow::DirectoryReader reader("/home/pascal-ginter/code/ActiveDataLake/data/lineitem_btr_sf10");
+	std::shared_ptr<::arrow::Schema> schema;
+	reader.GetSchema(&schema);
+
+	for (const auto& field : schema->fields()) {
+        names.emplace_back(field->name());
+		if (field->type() == ::arrow::int32()){
+			return_types.emplace_back(LogicalType::INTEGER);
+		}else if (field->type() == ::arrow::utf8()){
+			return_types.emplace_back(LogicalType::VARCHAR);
+		}else{
+			std::cout << "unsupported type" << std::endl;
+		}
+    }
+	return std::move(result);
 }
 
-inline void QuackOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &name_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(name_vector, result, args.size(), [&](string_t name) {
-		return StringVector::AddString(result, "Quack " + name.GetString() + ", my linked OpenSSL version is " +
-		                                           OPENSSL_VERSION_TEXT);
-	});
+struct QuackData : public GlobalTableFunctionState {
+public:
+	std::shared_ptr<::arrow::Table> table = nullptr;
+	btrblocks::arrow::DirectoryReader reader;
+	QuackData(std::string path) : reader(path){}
+};
+
+unique_ptr<GlobalTableFunctionState> QuackInit(ClientContext& context, TableFunctionInitInput &input) {
+	auto result = make_uniq<QuackData>("/home/pascal-ginter/code/ActiveDataLake/data/lineitem_btr_sf10");
+	return std::move(result);
+}
+
+void QuackTableFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto& data = data_p.global_state->Cast<QuackData>();
+	auto& bind_data = data_p.bind_data->Cast<QuackBindData>();
+
+	if (data.table == nullptr){
+		data.reader.ReadTable(&data.table);
+	}
+	std::cout << output.GetCapacity() << std::endl;
 }
 
 static void LoadInternal(DatabaseInstance &instance) {
-	// Register a scalar function
-	auto quack_scalar_function = ScalarFunction("quack", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QuackScalarFun);
-	ExtensionUtil::RegisterFunction(instance, quack_scalar_function);
-
-	// Register another scalar function
-	auto quack_openssl_version_scalar_function = ScalarFunction("quack_openssl_version", {LogicalType::VARCHAR},
-	                                                            LogicalType::VARCHAR, QuackOpenSSLVersionScalarFun);
-	ExtensionUtil::RegisterFunction(instance, quack_openssl_version_scalar_function);
+	TableFunction quack("quack", {}, QuackTableFunction, QuackBind, QuackInit);
+	ExtensionUtil::RegisterFunction(instance, quack);
 }
 
 void QuackExtension::Load(DuckDB &db) {
