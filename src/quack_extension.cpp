@@ -57,30 +57,37 @@ static unique_ptr<FunctionData> QuackBind(ClientContext &context, TableFunctionB
 			std::cout << "unsupported type" << std::endl;
 		}
 		idx++;
-		break;
     }
 	return std::move(result);
 }
 
 struct QuackData : public GlobalTableFunctionState {
 public:
-	bool first = true;
+	size_t array_offset = 0;
 	arrow_column_map_t arrow_convert_data = {};
-	std::shared_ptr<::arrow::Table> table = nullptr;
+	std::shared_ptr<::arrow::RecordBatchReader> batchReader;
+	std::shared_ptr<::arrow::RecordBatch> batch = nullptr;
 	btrblocks::arrow::DirectoryReader reader;
+	std::unique_ptr<ArrowScanLocalState> scan_state = nullptr;
+
 	QuackData(std::string path) : reader(path) {
 		std::shared_ptr<::arrow::Schema> schema;
 		reader.GetSchema(&schema);
-		idx_t idx = 0;
+		size_t idx = 0;
 		for (const auto& field : schema->fields()){
 			if (field->type() == ::arrow::int32()){
 				arrow_convert_data[idx] = make_shared_ptr<ArrowType>(LogicalType::INTEGER);
 			}else if (field->type() == ::arrow::utf8()){
-				arrow_convert_data[idx] = make_shared_ptr<ArrowType>(LogicalType::VARCHAR);
+				if (idx == 15){
+					arrow_convert_data[idx] = make_shared_ptr<ArrowType>(LogicalType::VARCHAR, make_uniq<ArrowStringInfo>(ArrowVariableSizeType::NORMAL));
+				}else{
+					arrow_convert_data[idx] = make_shared_ptr<ArrowType>(LogicalType::INTEGER);
+					arrow_convert_data[idx]->SetDictionary(make_uniq<ArrowType>(LogicalType::VARCHAR, make_uniq<ArrowStringInfo>(ArrowVariableSizeType::NORMAL)));
+				}
 			}
 			idx++;
-			break;
 		}
+		reader.GetRecordBatchReader(&batchReader);
 	}
 };
 
@@ -93,28 +100,22 @@ unique_ptr<GlobalTableFunctionState> QuackInit(ClientContext& context, TableFunc
 void QuackTableFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto& data = data_p.global_state->Cast<QuackData>();
 	auto& bind_data = data_p.bind_data->Cast<QuackBindData>();
-	std::cout << "column count" << output.ColumnCount() << std::endl;
-	idx_t start = 0;
-	std::shared_ptr<::arrow::Schema> schema;
-	data.reader.GetSchema(&schema);
-	if (data.first){
-		std::shared_ptr<::arrow::RecordBatchReader> batchReader;
-		data.reader.GetRecordBatchReader({0, 1}, {0, 1}, &batchReader);
-		std::shared_ptr<::arrow::RecordBatch> batch;
-		batchReader->ReadNext(&batch);
-		std::cout << batch->ToString() << std::endl;
+
+	if (!data.scan_state){
+		data.batchReader->ReadNext(&data.batch);
+		if (data.batch == nullptr) return;
 		auto wrapper = make_uniq<ArrowArrayWrapper>();
-		::arrow::ExportRecordBatch(*batch, &wrapper->arrow_array);
-		std::cout << "wrapper " << wrapper << std::endl;
-		ArrowScanLocalState scan_state(std::move(wrapper), context);
-		ArrowTableFunction::ArrowToDuckDB(scan_state, data.arrow_convert_data, output, start);
-		std::cout << scan_state.chunk_offset << " " << scan_state.batch_index << std::endl;
-		output.SetCardinality(2048);
-		data.first = false;
-		std::cout << "output size" << output.size() << std::endl;
+		::arrow::ExportRecordBatch(*data.batch, &wrapper->arrow_array);
+		data.scan_state = std::make_unique<ArrowScanLocalState>(std::move(wrapper), context);
+		data.array_offset = 0;
 	}
 
-	std::cout << output.GetCapacity() << std::endl;
+	size_t cardinality = std::min(data.scan_state->chunk->arrow_array.length - data.array_offset, 2048ul);
+	output.SetCardinality(cardinality);
+	ArrowTableFunction::ArrowToDuckDB(*data.scan_state, data.arrow_convert_data, output, data.array_offset);
+	data.array_offset += cardinality;
+	//std::cout << data.array_offset << std::endl;
+	if (data.array_offset == data.scan_state->chunk->arrow_array.length) data.scan_state = nullptr;
 }
 
 static void LoadInternal(DatabaseInstance &instance) {
