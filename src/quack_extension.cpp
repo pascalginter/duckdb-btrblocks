@@ -9,7 +9,7 @@
 #include "duckdb/function/table/arrow.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 // OpenSSL linked through vcpkg
-#include <btrblocks/arrow/DirectoryReader.hpp>
+#include "DirectoryReader.hpp"
 #include <btrblocks/scheme/SchemePool.hpp>
 
 #include <arrow/c/bridge.h>
@@ -32,17 +32,9 @@ public:
 static unique_ptr<FunctionData> QuackBind(ClientContext &context, TableFunctionBindInput &input,
 												  vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<QuackBindData>();
+	std::cout << "binding data" << std::endl;
 
-	//auto &fs = FileSystem::GetFileSystem(context);
-	//auto handle = fs.OpenFile("http://localhost:8000/data", FileFlags::FILE_FLAGS_READ);
-	//auto size = handle->GetFileSize();
-	//Allocator allocator;
-	//auto data = allocator.Allocate(size);
-
-	//handle->Read(data.get(), size);
-	//std::cout << "data " << (char*) data.get() << std::endl;
-
-	btrblocks::arrow::DirectoryReader reader("/home/pascal-ginter/code/ActiveDataLake/data/lineitem_btr_sf10");
+	DirectoryReader reader(context, "http://localhost:8000/data/lineitem_btr_sf10");
 	std::shared_ptr<::arrow::Schema> schema;
 	reader.GetSchema(&schema);
 
@@ -67,10 +59,10 @@ public:
 	arrow_column_map_t arrow_convert_data = {};
 	std::shared_ptr<::arrow::RecordBatchReader> batchReader;
 	std::shared_ptr<::arrow::RecordBatch> batch = nullptr;
-	btrblocks::arrow::DirectoryReader reader;
+	DirectoryReader reader;
 	std::unique_ptr<ArrowScanLocalState> scan_state = nullptr;
 
-	QuackData(std::string path) : reader(path) {
+	QuackData(ClientContext& context, std::string path) : reader(context, path) {
 		std::shared_ptr<::arrow::Schema> schema;
 		reader.GetSchema(&schema);
 		size_t idx = 0;
@@ -92,7 +84,7 @@ public:
 };
 
 unique_ptr<GlobalTableFunctionState> QuackInit(ClientContext& context, TableFunctionInitInput &input) {
-	auto result = make_uniq<QuackData>("/home/pascal-ginter/code/ActiveDataLake/data/lineitem_btr_sf10");
+	auto result = make_uniq<QuackData>(context, "http://localhost:8000/data/lineitem_btr_sf10");
 	btrblocks::SchemePool::refresh();
 	return std::move(result);
 }
@@ -100,7 +92,6 @@ unique_ptr<GlobalTableFunctionState> QuackInit(ClientContext& context, TableFunc
 void QuackTableFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto& data = data_p.global_state->Cast<QuackData>();
 	auto& bind_data = data_p.bind_data->Cast<QuackBindData>();
-
 	if (!data.scan_state){
 		data.batchReader->ReadNext(&data.batch);
 		if (data.batch == nullptr) return;
